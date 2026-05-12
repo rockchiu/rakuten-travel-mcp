@@ -94,11 +94,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "search_hotels",
       description:
-        "依地點搜尋飯店基本資訊（不含空房過濾）。可用地區代碼或經緯度搜尋。" +
+        "依關鍵字或地點搜尋飯店基本資訊（不含空房過濾）。可用地區代碼或經緯度搜尋。" +
         "適合用來取得飯店編號再進行空房查詢。",
       inputSchema: {
         type: "object",
         properties: {
+          keyword: {
+            type: "string",
+            description: "關鍵字搜尋（最少2個字元，空格分隔為AND搜尋）",
+          },
+          searchField: {
+            type: "integer",
+            enum: [0, 1],
+            description: "搜尋範圍：0=設施/計畫/房型名稱（預設）、1=僅設施名稱",
+          },
           latitude: {
             type: "number",
             description: "緯度（WGS84 十進位度數）",
@@ -127,13 +136,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "詳細區域代碼",
           },
-          keyword: {
+          hotelChainCode: {
             type: "string",
-            description: "關鍵字搜尋飯店名稱",
+            description: "飯店連鎖代碼（最多5個，逗號分隔）",
+          },
+          responseType: {
+            type: "string",
+            enum: ["small", "middle", "large"],
+            description: "回傳資訊詳細程度：small、middle（預設）、large",
+          },
+          sort: {
+            type: "string",
+            enum: ["standard", "+roomCharge", "-roomCharge"],
+            description: "排序：standard（預設）、+roomCharge（價格低到高）、-roomCharge（價格高到低）",
           },
           hits: {
             type: "integer",
             description: "每頁結果數（1-30），預設：30",
+          },
+          page: {
+            type: "integer",
+            description: "頁碼（1-100），預設：1",
           },
         },
       },
@@ -367,16 +390,59 @@ function formatHotelEntry(hotelWrapper: unknown): HotelEntry {
 
 async function searchHotels(args: Record<string, unknown>) {
   const params: Record<string, unknown> = baseParams({
-    responseType: "middle",
+    responseType: args.responseType ?? "middle",
     hits: args.hits ?? 30,
+    page: args.page ?? 1,
   });
 
   applyLocation(params, args);
   if (args.keyword) params.keyword = args.keyword;
+  if (args.searchField != null) params.searchField = args.searchField;
+  if (args.hotelChainCode) params.hotelChainCode = args.hotelChainCode;
+  if (args.sort) params.sort = args.sort;
 
   const data = await get("KeywordHotelSearch/20170426", params);
+
+  const pagingInfo = data.pagingInfo ?? {};
+  const hotels = (data.hotels ?? []).map((hotelWrapper: unknown) => {
+    let hotelArr: unknown[];
+    if (Array.isArray(hotelWrapper)) {
+      hotelArr = hotelWrapper;
+    } else {
+      hotelArr = ((hotelWrapper as Record<string, unknown>).hotel as unknown[]) ?? [];
+    }
+    const basicInfo =
+      ((hotelArr[0] as Record<string, unknown>)?.hotelBasicInfo as Record<string, unknown>) ?? {};
+    const ratingInfo =
+      ((hotelArr[1] as Record<string, unknown>)?.hotelRatingInfo as Record<string, unknown>) ?? {};
+    return {
+      hotelNo: basicInfo.hotelNo,
+      hotelName: basicInfo.hotelName,
+      address: `${basicInfo.address1 ?? ""}${basicInfo.address2 ?? ""}`,
+      nearestStation: basicInfo.nearestStation,
+      minCharge: basicInfo.hotelMinCharge,
+      reviewAverage: ratingInfo.serviceAverage,
+      reviewCount: basicInfo.reviewCount,
+      planListUrl: basicInfo.planListUrl,
+    };
+  });
+
   return {
-    content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(
+          {
+            totalResults: pagingInfo.recordCount ?? 0,
+            page: pagingInfo.page ?? 1,
+            pageCount: pagingInfo.pageCount ?? 1,
+            hotels,
+          },
+          null,
+          2
+        ),
+      },
+    ],
   };
 }
 
