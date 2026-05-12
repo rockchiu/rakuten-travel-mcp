@@ -1,5 +1,8 @@
+import { createServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -11,12 +14,9 @@ const ACCESS_KEY = process.env.RAKUTEN_ACCESS_KEY ?? "";
 const AFFILIATE_ID = process.env.RAKUTEN_AFFILIATE_ID ?? "";
 const BASE_URL = "https://openapi.rakuten.co.jp/engine/api/Travel";
 
-const server = new Server(
-  { name: "rakuten-travel-mcp", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+function registerHandlers(srv: Server) {
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
+srv.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "search_vacant_hotels",
@@ -188,7 +188,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+srv.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
   const safeArgs = (args ?? {}) as Record<string, unknown>;
 
@@ -218,6 +218,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 });
+
+}
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -464,13 +466,86 @@ async function getHotelDetail(args: Record<string, unknown>) {
 
 // ── entry point ────────────────────────────────────────────────────────────
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  process.stderr.write("Rakuten Travel MCP Server running\n");
+function createMcpServer() {
+  const srv = new Server(
+    { name: "rakuten-travel-mcp", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
+  registerHandlers(srv);
+  return srv;
 }
 
-main().catch((err) => {
-  process.stderr.write(`Fatal: ${err}\n`);
-  process.exit(1);
-});
+async function startStdio() {
+  const srv = createMcpServer();
+  const transport = new StdioServerTransport();
+  await srv.connect(transport);
+  process.stderr.write("Rakuten Travel MCP Server running (stdio)\n");
+}
+
+async function startHttp() {
+  const PORT = parseInt(process.env.PORT ?? "3000", 10);
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
+
+  const httpServer = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", `http://localhost`);
+
+    if (url.pathname !== "/mcp") {
+      res.writeHead(404).end("Not Found");
+      return;
+    }
+
+    if (req.method === "DELETE") {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      const transport = sessionId ? sessions.get(sessionId) : undefined;
+      if (!transport) {
+        res.writeHead(404).end("Session not found");
+        return;
+      }
+      await transport.close();
+      sessions.delete(sessionId!);
+      res.writeHead(200).end();
+      return;
+    }
+
+    if (req.method === "GET" || req.method === "POST") {
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      let transport = sessionId ? sessions.get(sessionId) : undefined;
+
+      if (!transport) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+        });
+        const srv = createMcpServer();
+        registerHandlers(srv);
+        transport.onclose = () => {
+          if (transport!.sessionId) sessions.delete(transport!.sessionId);
+        };
+        await srv.connect(transport);
+        if (transport.sessionId) sessions.set(transport.sessionId, transport);
+      }
+
+      await transport.handleRequest(req, res);
+      return;
+    }
+
+    res.writeHead(405).end("Method Not Allowed");
+  });
+
+  httpServer.listen(PORT, () => {
+    process.stderr.write(`Rakuten Travel MCP Server running on http://localhost:${PORT}/mcp\n`);
+  });
+}
+
+const mode = process.env.MCP_TRANSPORT ?? "stdio";
+
+if (mode === "http") {
+  startHttp().catch((err) => {
+    process.stderr.write(`Fatal: ${err}\n`);
+    process.exit(1);
+  });
+} else {
+  startStdio().catch((err) => {
+    process.stderr.write(`Fatal: ${err}\n`);
+    process.exit(1);
+  });
+}

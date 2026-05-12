@@ -2,6 +2,8 @@
 
 MCP server for Rakuten Travel hotel search, built with the [Model Context Protocol SDK](https://github.com/modelcontextprotocol/typescript-sdk).
 
+Supports both **stdio** and **HTTP Streaming** transports.
+
 ## Tools
 
 | Tool | Description |
@@ -39,9 +41,11 @@ RAKUTEN_AFFILIATE_ID=your_affiliate_id_here
 npm run build
 ```
 
-## MCP Client Configuration
+## Transports
 
-Add to your MCP client config (e.g. `claude_desktop_config.json`):
+### stdio (default)
+
+Used when running as a local MCP process. Add to your MCP client config (e.g. `claude_desktop_config.json`):
 
 ```json
 {
@@ -54,6 +58,31 @@ Add to your MCP client config (e.g. `claude_desktop_config.json`):
         "RAKUTEN_ACCESS_KEY": "your_access_key_here",
         "RAKUTEN_AFFILIATE_ID": "your_affiliate_id_here"
       }
+    }
+  }
+}
+```
+
+### HTTP Streaming
+
+Set `MCP_TRANSPORT=http` to start an HTTP server instead. The server listens on `/mcp` and implements the [MCP Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http).
+
+```bash
+MCP_TRANSPORT=http PORT=3000 node dist/index.js
+```
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `MCP_TRANSPORT` | `stdio` | Transport mode: `stdio` or `http` |
+| `PORT` | `3000` | HTTP port (only used when `MCP_TRANSPORT=http`) |
+
+Add to your MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "rakuten-travel": {
+      "url": "http://localhost:3000/mcp"
     }
   }
 }
@@ -85,6 +114,7 @@ Add to your MCP client config (e.g. `claude_desktop_config.json`):
 ## Development
 
 ```bash
-npm run dev   # run with tsx (no build step)
-npm run build # compile TypeScript to dist/
+npm run dev                          # stdio mode (no build step)
+MCP_TRANSPORT=http npm run dev       # HTTP streaming mode
+npm run build                        # compile TypeScript to dist/
 ```
